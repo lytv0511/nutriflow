@@ -2,11 +2,9 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
-from keras.models import Sequential
-from keras.layers import Conv1D, GlobalAveragePooling1D, Dense, Dropout, Input
+from keras.models import Sequential, Model
+from keras.layers import Conv1D, GlobalAveragePooling1D, Dense, Dropout, Input, Concatenate
 import os
-
-# ==== 0. Generate synthetic data and save as CSV if not present ====
 
 csv_path = "health_data.csv"
 if not os.path.exists(csv_path):
@@ -25,8 +23,6 @@ if not os.path.exists(csv_path):
     df_synth.to_csv(csv_path, index=False)
     print(f"Synthetic data generated and saved to {csv_path}")
 
-# ==== 1. Load and preprocess data ====
-
 df = pd.read_csv(csv_path, parse_dates=['date'])
 df = df.sort_values('date')
 
@@ -34,8 +30,6 @@ feature_cols = ['HRV', 'RHR', 'Sleep', 'Steps', 'Mood']
 target_col = 'Readiness'
 
 df[feature_cols] = (df[feature_cols] - df[feature_cols].mean()) / df[feature_cols].std()
-
-# ==== 2. Create sequences for model input ====
 
 sequence_length = 7
 
@@ -54,24 +48,25 @@ y = np.array(y)
 print(f"Shape of input X: {X.shape}")
 print(f"Shape of labels y: {y.shape}")
 
-# ==== 3. Build the Conv1D model (TFLite-compatible) ====
+def build_hybrid_model(seq_len, num_features):
+    input_layer = Input(shape=(seq_len, num_features), name="input")
 
-def build_readiness_model(seq_len, num_features):
-    model = Sequential([
-        Input(shape=(seq_len, num_features), name="input"),
-        Conv1D(32, kernel_size=3, activation='relu', padding='same'),
-        GlobalAveragePooling1D(),
-        Dense(32, activation='relu'),
-        Dropout(0.2),
-        Dense(1, activation='linear')
-    ])
+    conv3 = Conv1D(32, kernel_size=3, activation='relu', padding='same')(input_layer)   # short-term / ultradian
+    conv7 = Conv1D(32, kernel_size=7, activation='relu', padding='same')(input_layer)   # weekly / circadian overlay
+    conv14 = Conv1D(32, kernel_size=14, activation='relu', padding='same')(input_layer) # biweekly / infradian
+
+    merged = Concatenate()([conv3, conv7, conv14])
+    pooled = GlobalAveragePooling1D()(merged)
+    dense = Dense(64, activation='relu')(pooled)
+    dropout = Dropout(0.3)(dense)
+    output = Dense(1, activation='linear')(dropout)
+
+    model = Model(inputs=input_layer, outputs=output)
     model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
-model = build_readiness_model(sequence_length, len(feature_cols))
+model = build_hybrid_model(sequence_length, len(feature_cols))
 model.summary()
-
-# ==== 4. Train the model ====
 
 history = model.fit(
     X, y,
@@ -80,8 +75,6 @@ history = model.fit(
     validation_split=0.2,
     verbose=2
 )
-
-# ==== 5. Export to TensorFlow Lite model ====
 
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 tflite_model = converter.convert()
